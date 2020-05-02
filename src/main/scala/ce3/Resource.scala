@@ -145,7 +145,7 @@ object Resource {
     * @param a the value to lift into a resource
     */
   def pure[F[_], A, E](a: A)(implicit F: Bracket[F, E]): Resource[F, A] =
-    Allocate[F, F.Case, A](F.pure((a, (_: F.Case[Any]) => F.unit)))
+    Allocate[F, F.Case, A](F.pure((a, (_: F.Case[_]) => F.unit)))
 
   /**
     * Lifts an applicative into a resource. The resource has a no-op release.
@@ -196,8 +196,7 @@ object Resource {
     * along with its finalizers.
     */
   final case class Allocate[F[_], Case[_], A](
-      //todo: Any :(
-      resource: F[(A, Case[Any] => F[Unit])]
+      resource: F[(A, Case[_] => F[Unit])]
   ) extends Resource[F, A]
 
   /**
@@ -239,7 +238,7 @@ object Resource {
             Allocate[F, F.Case, Either[E, A]](
               F.map(F.attempt(alloc.resource)) {
                 case Left(error) =>
-                  (error.asLeft[A], (_: F.Case[Any]) => F.unit)
+                  (error.asLeft[A], (_: F.Case[_]) => F.unit)
                 case Right((a, release)) => (Right(a), release)
               }
             )
@@ -276,12 +275,12 @@ object Resource {
         Resource.tailRecM(a)(f)
 
       def CaseInstance: ApplicativeError[Case, E] =
-        // Outcome.applicativeError[Resource[F, *], E]
-        ???
+        Outcome.applicativeError[F, E]
 
       def openCase[A](acquire: F[A])(
           release: (A, Case[_]) => F[Unit]
-      ): Resource[F, A] = Allocate(acquire.map(a => (a, release(a, _))))
+      ): Resource[F, A] =
+        Allocate[F, Case, A](acquire.map(a => (a, release(a, _))))
 
       def liftF[A](fa: F[A]): Resource[F, A] = Resource.liftF(fa)
 
