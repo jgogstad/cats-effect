@@ -243,9 +243,9 @@ object Resource {
 
   implicit def regionForResource[F[_], E](
       implicit F: Bracket[F, E]
-  ): Region.Aux2[Resource, F, E, Outcome[F, *, *]] =
+  ): Region.Aux[Resource, F, E, F.Case] =
     new Region[Resource, F, E] {
-      override type Case[A] = Outcome[F, E, A]
+      override type Case[A] = F.Case[A]
 
       def pure[A](x: A): Resource[F, A] = Resource.pure[F, E, A](x)
 
@@ -302,7 +302,7 @@ object Resource {
         Resource.tailRecM(a)(f)
 
       def CaseInstance: ApplicativeError[Case, E] =
-        Outcome.applicativeError[F, E]
+        F.CaseInstance
 
       def openCase[A](acquire: F[A])(
           release: (A, Case[_]) => F[Unit]
