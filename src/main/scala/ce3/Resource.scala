@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package ce3
 
 import cats.ApplicativeError
@@ -242,7 +243,7 @@ object Resource {
 
   implicit def regionForResource[F[_], E](
       implicit F: Bracket[F, E]
-  ): Region[Resource, F, E] { type Case[A] = Outcome[F, E, A] } =
+  ): Region.Aux2[Resource, F, E, Outcome[F, *, *]] =
     new Region[Resource, F, E] {
       override type Case[A] = Outcome[F, E, A]
 
