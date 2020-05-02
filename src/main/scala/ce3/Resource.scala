@@ -1,0 +1,294 @@
+package ce3
+
+import cats.ApplicativeError
+import cats.implicits._
+import scala.annotation.tailrec
+import cats.Functor
+import cats.Applicative
+import cats.Monad
+import cats.data.AndThen
+
+sealed abstract class Resource[+F[_], +A] {
+  import Resource.{Allocate, Bind, Suspend}
+
+  private def fold[G[x] >: F[x], B, E](
+      onOutput: A => G[B],
+      onRelease: G[Unit] => G[Unit]
+  )(implicit F: Bracket[G, E]): G[B] = {
+    // Indirection for calling `loop` needed because `loop` must be @tailrec
+    def continue(
+        current: Resource[G, Any],
+        stack: List[Any => Resource[G, Any]]
+    ): G[Any] =
+      loop(current, stack)
+
+    // Interpreter that knows how to evaluate a Resource data structure;
+    // Maintains its own stack for dealing with Bind chains
+    @tailrec def loop(
+        current: Resource[G, Any],
+        stack: List[Any => Resource[G, Any]]
+    ): G[Any] =
+      current match {
+        case a: Allocate[G, F.Case, Any] @unchecked =>
+          F.bracketCase(a.resource) {
+            case (a, _) =>
+              stack match {
+                case Nil => onOutput.asInstanceOf[Any => G[Any]](a)
+                case l   => continue(l.head(a), l.tail)
+              }
+          } {
+            case ((_, release), ec) =>
+              onRelease(release(ec))
+          }
+        case b: Bind[G, _, Any] =>
+          loop(b.source, b.fs.asInstanceOf[Any => Resource[G, Any]] :: stack)
+        case s: Suspend[G, Any] =>
+          s.resource.flatMap(continue(_, stack))
+      }
+    loop(this.asInstanceOf[Resource[G, Any]], Nil).asInstanceOf[G[B]]
+  }
+
+  def use[G[x] >: F[x], B, E](
+      f: A => G[B]
+  )(implicit F: Bracket[G, E]): G[B] =
+    fold[G, B, E](f, identity)
+  //todo: allocated?
+
+  def used[G[x] >: F[x], E](implicit F: Bracket[G, E]): G[Unit] =
+    use(_ => F.unit)
+}
+
+object Resource {
+
+  /**
+    * Creates a resource from an allocating effect.
+    *
+    * @see [[make]] for a version that separates the needed resource
+    *      with its finalizer tuple in two parameters
+    *
+    * @tparam F the effect type in which the resource is acquired and released
+    * @tparam A the type of the resource
+    * @param resource an effect that returns a tuple of a resource and
+    *        an effect to release it
+    */
+  def apply[F[_], A, E](
+      resource: F[(A, F[Unit])]
+  )(implicit F: Bracket[F, E]): Resource[F, A] =
+    Allocate[F, F.Case, A] {
+      resource.map {
+        case (a, release) => (a, _ => release)
+      }
+    }
+
+  /**
+    * Creates a resource from an allocating effect, with a finalizer
+    * that is able to distinguish between [[ExitCase exit cases]].
+    *
+    * @see [[makeCase]] for a version that separates the needed resource
+    *      with its finalizer tuple in two parameters
+    *
+    * @tparam F the effect type in which the resource is acquired and released
+    * @tparam A the type of the resource
+    * @param resource an effect that returns a tuple of a resource and
+    *        an effectful function to release it
+    */
+  //todo: will need some partially applied class type or something
+  // def applyCase[F[_], A](
+  //     resource: F[(A, ExitCase[Throwable] => F[Unit])]
+  // ): Resource[F, A] =
+  //   Allocate(resource)
+
+  /**
+    * Given a `Resource` suspended in `F[_]`, lifts it in the `Resource` context.
+    */
+  def suspend[F[_], A](fr: F[Resource[F, A]]): Resource[F, A] =
+    Resource.Suspend(fr)
+
+  /**
+    * Creates a resource from an acquiring effect and a release function.
+    *
+    * This builder mirrors the signature of [[Bracket.bracket]].
+    *
+    * @tparam F the effect type in which the resource is acquired and released
+    * @tparam A the type of the resource
+    * @param acquire a function to effectfully acquire a resource
+    * @param release a function to effectfully release the resource returned by `acquire`
+    */
+  def make[F[_], A, E](
+      acquire: F[A]
+  )(release: A => F[Unit])(implicit F: Bracket[F, E]): Resource[F, A] =
+    apply[F, A, E](acquire.map(a => a -> release(a)))
+
+  /**
+    * Creates a resource from an acquiring effect and a release function that can
+    * discriminate between different [[ExitCase exit cases]].
+    *
+    * This builder mirrors the signature of [[Bracket.bracketCase]].
+    *
+    * @tparam F the effect type in which the resource is acquired and released
+    * @tparam A the type of the resource
+    * @param acquire a function to effectfully acquire a resource
+    * @param release a function to effectfully release the resource returned by `acquire`
+    */
+  // def makeCase[F[_], A](
+  //     acquire: F[A]
+  // )(
+  //     release: (A, ExitCase[Throwable]) => F[Unit]
+  // )(implicit F: Functor[F]): Resource[F, A] =
+  //   applyCase[F, A](
+  //     acquire.map(a => (a, (e: ExitCase[Throwable]) => release(a, e)))
+  //   )
+
+  /**
+    * Lifts a pure value into a resource. The resource has a no-op release.
+    *
+    * @param a the value to lift into a resource
+    */
+  def pure[F[_], A, E](a: A)(implicit F: Bracket[F, E]): Resource[F, A] =
+    Allocate[F, F.Case, A](F.pure((a, (_: F.Case[Any]) => F.unit)))
+
+  /**
+    * Lifts an applicative into a resource. The resource has a no-op release.
+    * Preserves interruptibility of `fa`.
+    *
+    * @param fa the value to lift into a resource
+    */
+  def liftF[F[_], A, E](fa: F[A])(implicit F: Bracket[F, E]): Resource[F, A] =
+    Resource.suspend(fa.map(a => Resource.pure[F, A, E](a)))
+
+  /**
+    * Implementation for the `tailRecM` operation, as described via
+    * the `cats.Monad` type class.
+    */
+  def tailRecM[F[_], A, B, E](
+      a: A
+  )(
+      f: A => Resource[F, Either[A, B]]
+  )(implicit F: Bracket[F, E]): Resource[F, B] = {
+    def continue(r: Resource[F, Either[A, B]]): Resource[F, B] =
+      r match {
+        case a: Allocate[F, F.Case, Either[A, B]] =>
+          Suspend(a.resource.flatMap[Resource[F, B]] {
+            case (Left(a), release) =>
+              release(F.CaseInstance.pure(a)).map(_ =>
+                tailRecM[F, A, B, E](a)(f)
+              )
+            case (Right(b), release) =>
+              F.pure(Allocate[F, F.Case, B](F.pure((b, release))))
+          })
+        case s: Suspend[F, Either[A, B]] =>
+          Suspend(s.resource.map(continue))
+        case b: Bind[F, _, Either[A, B]] =>
+          Bind(b.source, AndThen(b.fs).andThen(continue))
+      }
+
+    continue(f(a))
+  }
+
+  /**
+    * Lifts an applicative into a resource as a `FunctionK`. The resource has a no-op release.
+    */
+  // def liftK[F[_]](implicit F: Applicative[F]): F ~> Resource[F, *] =
+  // λ[F ~> Resource[F, *]](Resource.liftF(_))
+
+  /**
+    * `Resource` data constructor that wraps an effect allocating a resource,
+    * along with its finalizers.
+    */
+  final case class Allocate[F[_], Case[_], A](
+      //todo: Any :(
+      resource: F[(A, Case[Any] => F[Unit])]
+  ) extends Resource[F, A]
+
+  /**
+    * `Resource` data constructor that encodes the `flatMap` operation.
+    */
+  final case class Bind[F[_], S, +A](
+      source: Resource[F, S],
+      fs: S => Resource[F, A]
+  ) extends Resource[F, A]
+
+  /**
+    * `Resource` data constructor that suspends the evaluation of another
+    * resource value.
+    */
+  final case class Suspend[F[_], A](resource: F[Resource[F, A]])
+      extends Resource[F, A]
+
+  implicit def regionForResource[F[_], E](
+      implicit F: Bracket[F, E]
+  ): Region[Resource, F, E] { type Case[A] = Outcome[F, E, A] } =
+    new Region[Resource, F, E] {
+      override type Case[A] = Outcome[F, E, A]
+
+      def pure[A](x: A): Resource[F, A] = Resource.pure[F, A, E](x)
+
+      def raiseError[A](e: E): Resource[F, A] = Resource.liftF(F.raiseError(e))
+
+      def handleErrorWith[A](
+          fa: Resource[F, A]
+      )(f: E => Resource[F, A]): Resource[F, A] =
+        flatMap(attempt(fa)) {
+          case Right(a) => pure(a)
+          case Left(e)  => f(e)
+        }
+
+      override def attempt[A](fa: Resource[F, A]): Resource[F, Either[E, A]] =
+        fa match {
+          case alloc: Allocate[F, F.Case, b] @unchecked =>
+            Allocate[F, F.Case, Either[E, A]](
+              F.map(F.attempt(alloc.resource)) {
+                case Left(error) =>
+                  (error.asLeft[A], (_: F.Case[Any]) => F.unit)
+                case Right((a, release)) => (Right(a), release)
+              }
+            )
+          case Bind(
+              source: Resource[F, Any] @unchecked,
+              fs: (Any => Resource[F, A]) @unchecked
+              ) =>
+            Suspend(F.pure(source).map[Resource[F, Either[E, A]]] { source =>
+              Bind(
+                attempt(source),
+                (r: Either[E, Any]) =>
+                  r match {
+                    case Left(error) =>
+                      Resource.pure[F, Either[E, A], E](Left(error))
+                    case Right(s) => attempt(fs(s))
+                  }
+              )
+            })
+
+          case Suspend(resource) =>
+            Suspend(F.map(F.attempt(resource)) {
+              case Left(error) => Resource.pure[F, Either[E, A], E](Left(error))
+              case Right(fa)   => attempt(fa) //dead code warning?
+            })
+        }
+
+      def flatMap[A, B](fa: Resource[F, A])(
+          f: A => Resource[F, B]
+      ): Resource[F, B] = Bind(fa, f)
+
+      def tailRecM[A, B](
+          a: A
+      )(f: A => Resource[F, Either[A, B]]): Resource[F, B] =
+        Resource.tailRecM(a)(f)
+
+      def CaseInstance: ApplicativeError[Case, E] =
+        // Outcome.applicativeError[Resource[F, *], E]
+        ???
+
+      def openCase[A](acquire: F[A])(
+          release: (A, Case[_]) => F[Unit]
+      ): Resource[F, A] = Allocate(acquire.map(a => (a, release(a, _))))
+
+      def liftF[A](fa: F[A]): Resource[F, A] = Resource.liftF(fa)
+
+      def supersededBy[B](
+          rfa: Resource[F, _],
+          rfb: Resource[F, B]
+      ): Resource[F, B] = Resource.liftF(rfa.use(_ => F.unit)) *> rfb
+
+    }
+}
