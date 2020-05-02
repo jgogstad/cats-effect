@@ -41,19 +41,57 @@ import org.specs2.mutable._
 
 import playground._
 import org.typelevel.discipline.specs2.mutable.Discipline
+import cats.laws.discipline.SemigroupalTests.Isomorphisms
 
 class ResourceSpec extends Specification with Discipline with ScalaCheck {
   import Generators._
 
+  def arbOutcomeFEFUniversal[F[_]: Applicative, E, A](
+      implicit arbOutcome: Arbitrary[Outcome[F, E, A]]
+  ): Arbitrary[Outcome[F, E, _]] =
+    Arbitrary(arbOutcome.arbitrary.map(_.widen[Any]))
+
+  def cogenOutcomeFEFUniversal[F[_]: Applicative, E](
+      implicit cogenOutcome: Cogen[Outcome[F, E, Unit]]
+  ): Cogen[Outcome[F, E, _]] =
+    cogenOutcome.contramap(_.void)
+
   checkAll(
     "Resource", {
 
-      implicit def cogenLawsCase[F[_]: Applicative, E](
-          implicit base: Cogen[
-            Outcome[F, E, Unit]
-          ] //not too sure about this one
-      ): Cogen[Outcome[F, E, _]] =
-        base.contramap(_.void)
+      def i[A](implicit a: A): a.type = a
+
+      type F[A] = PureConc[Int, A]
+
+      type RF[A] = Resource[F, A]
+
+      implicit def cogenFinalizer[A](
+          implicit arbFA: Arbitrary[F[A]]
+      ): Cogen[Outcome[F, Int, _] => F[Unit]] =
+        Cogen.function1[Outcome[F, Int, _], F[Unit]](
+          arbOutcomeFEFUniversal[F, Int, A],
+          Cogen[F[Unit]]
+        )
+
+      implicit def arbRFA[A: Arbitrary: Cogen]: Arbitrary[RF[A]] =
+        arbResource[F, Outcome[F, Int, *], Int, A](
+          i[Arbitrary[A]],
+          Cogen[A],
+          i[Bracket[F, Int]],
+          Arbitrary(Gen.delay(i[Arbitrary[F[RF[A]]]].arbitrary)),
+          arbPureConc[Int, (A, Outcome[F, Int, _] => F[Unit])](
+            i[Arbitrary[Int]],
+            Cogen[Int],
+            i[Arbitrary[(A, Outcome[F, Int, _] => F[Unit])]],
+            Cogen.tuple2[A, Outcome[F, Int, _] => F[Unit]](
+              Cogen[A],
+              cogenFinalizer[A]
+            )
+          )
+        )
+
+      implicit def cogenOutcomeFE[E: Cogen]: Cogen[Outcome[F, E, _]] =
+        cogenOutcomeFEFUniversal[F, E]
 
       RegionTests[
         Resource,
@@ -81,24 +119,17 @@ class ResourceSpec extends Specification with Discipline with ScalaCheck {
         s"${result.show} !== ${expect.show}"
       )
 
-  implicit def arbitraryPureConcResource[
-      E: Arbitrary: Cogen,
-      A: Arbitrary: Cogen
-  ]: Arbitrary[PureConc[E, Resource[PureConc[E, *], A]]] =
-    Arbitrary(
-      Gen.delay(
-        arbPureConc[E, Resource[PureConc[E, *], A]].arbitrary
-      )
-    )
+  implicit def arbResource[F[_], Case[_], E, A: Arbitrary: Cogen](
+      implicit
+      bracket: Bracket.Aux[F, E, Case],
+      arbEffect: Arbitrary[F[Resource[F, A]]],
+      arbAlloc: Arbitrary[F[(A, Case[_] => F[Unit])]]
+  ): Arbitrary[Resource[F, A]] = Arbitrary(genResource[F, Case, E, A])
 
-  implicit def arbResource[F[_]: Bracket[*[_], E], E, A: Arbitrary: Cogen](
-      implicit arbEffect: Arbitrary[F[Resource[F, A]]],
-      arbFA: Arbitrary[F[A]],
-      arbAFUnit: Arbitrary[A => F[Unit]]
-  ): Arbitrary[Resource[F, A]] = Arbitrary(genResource[F, E, A])
-
-  implicit def cogenResource[F[_]: Bracket[*[_], E], E, A](
-      implicit cogenF: Cogen[F[Unit]]
+  implicit def cogenResource[F[_], E, A](
+      implicit
+      bracket: Bracket[F, E],
+      cogenF: Cogen[F[Unit]]
   ): Cogen[Resource[F, A]] = cogenF.contramap(_.used)
 
   implicit def eqResource[F[_]: Bracket[*[_], E], E, A](

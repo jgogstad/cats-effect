@@ -107,11 +107,22 @@ object Resource {
     * @param resource an effect that returns a tuple of a resource and
     *        an effectful function to release it
     */
-  //todo: will need some partially applied class type or something
-  // def applyCase[F[_], A](
-  //     resource: F[(A, ExitCase[Throwable] => F[Unit])]
-  // ): Resource[F, A] =
-  //   Allocate(resource)
+  def applyCase[F[_], Case[_], E, A](
+      resource: F[(A, Case[_] => F[Unit])]
+  )(implicit F: Bracket.Aux[F, E, Case]): Resource[F, A] =
+    Allocate[F, Case, A](resource)
+
+  def applyCase0[F[_], E](
+      implicit bracket: Bracket[F, E]
+  ): ApplyCasePartiallyApplied[F, bracket.Case, E] =
+    new ApplyCasePartiallyApplied[F, bracket.Case, E](bracket)
+
+  final class ApplyCasePartiallyApplied[F[_], Case[_], E](
+      bracket: Bracket.Aux[F, E, Case]
+  ) {
+    def apply[A](resource: F[(A, Case[_] => F[Unit])]): Resource[F, A] =
+      applyCase[F, Case, E, A](resource)(bracket)
+  }
 
   /**
     * Given a `Resource` suspended in `F[_]`, lifts it in the `Resource` context.
@@ -145,14 +156,14 @@ object Resource {
     * @param acquire a function to effectfully acquire a resource
     * @param release a function to effectfully release the resource returned by `acquire`
     */
-  // def makeCase[F[_], A](
-  //     acquire: F[A]
-  // )(
-  //     release: (A, ExitCase[Throwable]) => F[Unit]
-  // )(implicit F: Functor[F]): Resource[F, A] =
-  //   applyCase[F, A](
-  //     acquire.map(a => (a, (e: ExitCase[Throwable]) => release(a, e)))
-  //   )
+  def makeCase[F[_], Case[_], E, A](
+      acquire: F[A]
+  )(
+      release: (A, Case[_]) => F[Unit]
+  )(implicit F: Bracket.Aux[F, E, Case]): Resource[F, A] =
+    applyCase[F, Case, E, A](
+      acquire.map(a => (a, e => release(a, e)))
+    )
 
   /**
     * Lifts a pure value into a resource. The resource has a no-op release.

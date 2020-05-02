@@ -26,16 +26,15 @@ object Generators {
 
   private[this] def F[E] = ConcurrentBracket[PureConc[E, ?], E]
 
-  def genResource[F[_]: Bracket[*[_], E], E, A: Arbitrary: Cogen](
+  def genResource[F[_]: Bracket.Aux[*[_], E, Case], Case[_], E, A: Arbitrary: Cogen](
       implicit arbEffect: Arbitrary[F[Resource[F, A]]],
-      arbFA: Arbitrary[F[A]],
-      arbAFUnit: Arbitrary[A => F[Unit]]
+      arbAlloate: Arbitrary[F[(A, Case[_] => F[Unit])]]
   ): Gen[Resource[F, A]] = {
-    val self = Gen.delay(genResource[F, E, A])
+    val self = Gen.delay(genResource[F, Case, E, A])
     Gen.frequency(
       1 -> genPureResource[F, E, A],
       1 -> genSuspendResource[F, E, A],
-      1 -> genMakeResource[F, E, A],
+      1 -> genApplyResource[F, Case, E, A],
       1 -> genFlatMapResource[F, E, A](
         self,
         Arbitrary.arbFunction1(Arbitrary(self), Cogen[A]).arbitrary
@@ -52,14 +51,10 @@ object Generators {
   ): Gen[Resource[F, A]] =
     arbEffect.arbitrary.map(Resource.suspend)
 
-  def genMakeResource[F[_]: Bracket[*[_], E], E, A](
-      implicit arbFA: Arbitrary[F[A]],
-      arbAFUnit: Arbitrary[A => F[Unit]]
+  def genApplyResource[F[_]: Bracket.Aux[*[_], E, Case], Case[_], E, A](
+      implicit arbFA: Arbitrary[F[(A, Case[_] => F[Unit])]]
   ): Gen[Resource[F, A]] =
-    for {
-      allocate <- arbFA.arbitrary
-      release <- arbAFUnit.arbitrary
-    } yield Resource.make(allocate)(release)
+    arbFA.arbitrary.map(Resource.applyCase[F, Case, E, A](_))
 
   def genFlatMapResource[F[_]: Bracket[*[_], E], E, A](
       baseGen: Gen[Resource[F, A]],
