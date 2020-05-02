@@ -26,14 +26,61 @@ object Generators {
 
   private[this] def F[E] = ConcurrentBracket[PureConc[E, ?], E]
 
-  def genPureConc[E: Arbitrary: Cogen, A: Arbitrary: Cogen](depth: Int): Gen[PureConc[E, A]] = {
+  def genResource[F[_]: Bracket[*[_], E], E, A: Arbitrary: Cogen](
+      implicit arbEffect: Arbitrary[F[Resource[F, A]]],
+      arbFA: Arbitrary[F[A]],
+      arbAFUnit: Arbitrary[A => F[Unit]]
+  ): Gen[Resource[F, A]] = {
+    val self = Gen.delay(genResource[F, E, A])
+    Gen.frequency(
+      1 -> genPureResource[F, E, A],
+      1 -> genSuspendResource[F, E, A],
+      1 -> genMakeResource[F, E, A],
+      1 -> genFlatMapResource[F, E, A](
+        self,
+        Arbitrary.arbFunction1(Arbitrary(self), Cogen[A]).arbitrary
+      )
+    )
+  }
+
+  def genPureResource[F[_]: Bracket[*[_], E], E, A: Arbitrary]
+      : Gen[Resource[F, A]] =
+    Arbitrary.arbitrary[A].map(Resource.pure[F, E, A](_))
+
+  def genSuspendResource[F[_]: Bracket[*[_], E], E, A](
+      implicit arbEffect: Arbitrary[F[Resource[F, A]]]
+  ): Gen[Resource[F, A]] =
+    arbEffect.arbitrary.map(Resource.suspend)
+
+  def genMakeResource[F[_]: Bracket[*[_], E], E, A](
+      implicit arbFA: Arbitrary[F[A]],
+      arbAFUnit: Arbitrary[A => F[Unit]]
+  ): Gen[Resource[F, A]] =
+    for {
+      allocate <- arbFA.arbitrary
+      release <- arbAFUnit.arbitrary
+    } yield Resource.make(allocate)(release)
+
+  def genFlatMapResource[F[_]: Bracket[*[_], E], E, A](
+      baseGen: Gen[Resource[F, A]],
+      genFunction: Gen[A => Resource[F, A]]
+  ): Gen[Resource[F, A]] =
+    for {
+      base <- baseGen
+      f <- genFunction
+    } yield base.flatMap(f)
+
+  def genPureConc[E: Arbitrary: Cogen, A: Arbitrary: Cogen](
+      depth: Int
+  ): Gen[PureConc[E, A]] = {
     if (depth > 10) {
       Gen.frequency(
         1 -> genPure[E, A],
         1 -> genRaiseError[E, A],
         1 -> genCanceled[E, A],
         1 -> genCede[E].flatMap(pc => arbitrary[A].map(pc.as(_))),
-        1 -> Gen.delay(genNever))
+        1 -> Gen.delay(genNever)
+      )
     } else {
       Gen.frequency(
         1 -> genPure[E, A],
@@ -47,7 +94,8 @@ object Generators {
         1 -> Gen.delay(genRacePair[E, A](depth)),
         1 -> Gen.delay(genStart[E, A](depth)),
         1 -> Gen.delay(genJoin[E, A](depth)),
-        1 -> Gen.delay(genFlatMap[E, A](depth)))
+        1 -> Gen.delay(genFlatMap[E, A](depth))
+      )
     }
   }
 
@@ -57,8 +105,11 @@ object Generators {
   def genRaiseError[E: Arbitrary, A]: Gen[PureConc[E, A]] =
     arbitrary[E].map(F[E].raiseError[A](_))
 
-  def genHandleErrorWith[E: Arbitrary: Cogen, A: Arbitrary: Cogen](depth: Int): Gen[PureConc[E, A]] = {
-    implicit def arbPureConc[E2: Arbitrary: Cogen, A2: Arbitrary: Cogen]: Arbitrary[PureConc[E2, A2]] =
+  def genHandleErrorWith[E: Arbitrary: Cogen, A: Arbitrary: Cogen](
+      depth: Int
+  ): Gen[PureConc[E, A]] = {
+    implicit def arbPureConc[E2: Arbitrary: Cogen, A2: Arbitrary: Cogen]
+        : Arbitrary[PureConc[E2, A2]] =
       Arbitrary(genPureConc[E2, A2](depth + 1))
 
     for {
@@ -67,19 +118,26 @@ object Generators {
     } yield F[E].handleErrorWith(fa)(f)
   }
 
-  def genBracketCase[E: Arbitrary: Cogen, A: Arbitrary: Cogen](depth: Int): Gen[PureConc[E, A]] = {
-    implicit def arbPureConc[E2: Arbitrary: Cogen, A2: Arbitrary: Cogen]: Arbitrary[PureConc[E2, A2]] =
+  def genBracketCase[E: Arbitrary: Cogen, A: Arbitrary: Cogen](
+      depth: Int
+  ): Gen[PureConc[E, A]] = {
+    implicit def arbPureConc[E2: Arbitrary: Cogen, A2: Arbitrary: Cogen]
+        : Arbitrary[PureConc[E2, A2]] =
       Arbitrary(genPureConc[E2, A2](depth + 1))
 
     for {
       acquire <- genPureConc[E, A](depth + 1)
       use <- arbitrary[A => PureConc[E, A]]
-      release <- arbitrary[(A, Outcome[PureConc[E, ?], E, A]) => PureConc[E, Unit]]
+      release <- arbitrary[
+        (A, Outcome[PureConc[E, ?], E, A]) => PureConc[E, Unit]
+      ]
     } yield F[E].bracketCase(acquire)(use)(release)
   }
 
   // TODO we can't really use poll :-( since we can't Cogen FunctionK
-  def genUncancelable[E: Arbitrary: Cogen, A: Arbitrary: Cogen](depth: Int): Gen[PureConc[E, A]] =
+  def genUncancelable[E: Arbitrary: Cogen, A: Arbitrary: Cogen](
+      depth: Int
+  ): Gen[PureConc[E, A]] =
     genPureConc[E, A](depth).map(pc => F[E].uncancelable(_ => pc))
 
   def genCanceled[E, A: Arbitrary]: Gen[PureConc[E, A]] =
@@ -91,17 +149,25 @@ object Generators {
   def genNever[E, A]: Gen[PureConc[E, A]] =
     F[E].never[A]
 
-  def genStart[E: Arbitrary: Cogen, A: Arbitrary](depth: Int): Gen[PureConc[E, A]] =
-    genPureConc[E, Unit](depth).flatMap(pc => arbitrary[A].map(a => F[E].start(pc).as(a)))
+  def genStart[E: Arbitrary: Cogen, A: Arbitrary](
+      depth: Int
+  ): Gen[PureConc[E, A]] =
+    genPureConc[E, Unit](depth).flatMap(pc =>
+      arbitrary[A].map(a => F[E].start(pc).as(a))
+    )
 
-  def genJoin[E: Arbitrary: Cogen, A: Arbitrary: Cogen](depth: Int): Gen[PureConc[E, A]] =
+  def genJoin[E: Arbitrary: Cogen, A: Arbitrary: Cogen](
+      depth: Int
+  ): Gen[PureConc[E, A]] =
     for {
       fiber <- genPureConc[E, A](depth)
       cont <- genPureConc[E, Unit](depth)
       a <- arbitrary[A]
     } yield F[E].start(fiber).flatMap(f => cont >> f.join).as(a)
 
-  def genRacePair[E: Arbitrary: Cogen, A: Arbitrary: Cogen](depth: Int): Gen[PureConc[E, A]] =
+  def genRacePair[E: Arbitrary: Cogen, A: Arbitrary: Cogen](
+      depth: Int
+  ): Gen[PureConc[E, A]] =
     for {
       fa <- genPureConc[E, A](depth + 1)
       fb <- genPureConc[E, A](depth + 1)
@@ -123,7 +189,9 @@ object Generators {
       }
     } yield back
 
-  def genFlatMap[E: Arbitrary: Cogen, A: Arbitrary: Cogen](depth: Int): Gen[PureConc[E, A]] = {
+  def genFlatMap[E: Arbitrary: Cogen, A: Arbitrary: Cogen](
+      depth: Int
+  ): Gen[PureConc[E, A]] = {
     implicit val arbPureConc: Arbitrary[PureConc[E, A]] =
       Arbitrary(genPureConc[E, A](depth + 1))
 
@@ -136,18 +204,25 @@ object Generators {
   implicit def cogenPureConc[E: Cogen, A: Cogen]: Cogen[PureConc[E, A]] =
     Cogen[Outcome[Option, E, A]].contramap(run(_))
 
-  implicit def arbExitCase[F[_], E: Arbitrary, A](implicit A: Arbitrary[F[A]]): Arbitrary[Outcome[F, E, A]] =
+  implicit def arbExitCase[F[_], E: Arbitrary, A](
+      implicit A: Arbitrary[F[A]]
+  ): Arbitrary[Outcome[F, E, A]] =
     Arbitrary(genExitCase[F, E, A])
 
-  def genExitCase[F[_], E: Arbitrary, A](implicit A: Arbitrary[F[A]]): Gen[Outcome[F, E, A]] =
+  def genExitCase[F[_], E: Arbitrary, A](
+      implicit A: Arbitrary[F[A]]
+  ): Gen[Outcome[F, E, A]] =
     Gen.oneOf(
       Gen.const(Outcome.Canceled),
       Arbitrary.arbitrary[E].map(Outcome.Errored(_)),
-      Arbitrary.arbitrary[F[A]].map(Outcome.Completed(_)))
+      Arbitrary.arbitrary[F[A]].map(Outcome.Completed(_))
+    )
 
-  implicit def cogenExitCase[F[_], E: Cogen, A](implicit A: Cogen[F[A]]): Cogen[Outcome[F, E, A]] = Cogen[Option[Either[E, F[A]]]].contramap {
-    case Outcome.Canceled => None
+  implicit def cogenExitCase[F[_], E: Cogen, A](
+      implicit A: Cogen[F[A]]
+  ): Cogen[Outcome[F, E, A]] = Cogen[Option[Either[E, F[A]]]].contramap {
+    case Outcome.Canceled      => None
     case Outcome.Completed(fa) => Some(Right(fa))
-    case Outcome.Errored(e) => Some(Left(e))
+    case Outcome.Errored(e)    => Some(Left(e))
   }
 }

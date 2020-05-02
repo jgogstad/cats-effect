@@ -32,21 +32,20 @@ class ResourceSpec extends Specification with Discipline with ScalaCheck {
 
   checkAll(
     "Resource", {
-      val testz: RegionTests[Resource, PureConc[Int, *], Int] = RegionTests[
+
+      implicit def cogenLawsCase[F[_]: Applicative, E](
+          implicit base: Cogen[
+            Outcome[F, E, Unit]
+          ] //not too sure about this one
+      ): Cogen[Outcome[F, E, _]] =
+        base.contramap(_.void)
+
+      RegionTests[
         Resource,
         PureConc[Int, *],
         Outcome[PureConc[Int, *], Int, *],
         Int
-      ]
-
-      val lawz: testz.laws.type =
-        testz.laws
-
-      implicit val cogenLawsCase: Cogen[lawz.F.Case[_]] =
-        cogenExitCase[PureConc[Int, *], Int, Unit]
-          .asInstanceOf[Cogen[lawz.F.Case[_]]] //just to get this to compile...
-
-      testz.region[Int, Int, Int]
+      ].region[Int, Int, Int]
     }
   )
 
@@ -67,13 +66,35 @@ class ResourceSpec extends Specification with Discipline with ScalaCheck {
         s"${result.show} !== ${expect.show}"
       )
 
-  implicit def arbResource[F[_], E, A]: Arbitrary[Resource[F, A]] = ???
-  implicit def cogenResource[F[_], E, A]: Cogen[Resource[F, A]] = ???
+  implicit def arbitraryPureConcResource[
+      E: Arbitrary: Cogen,
+      A: Arbitrary: Cogen
+  ]: Arbitrary[PureConc[E, Resource[PureConc[E, *], A]]] =
+    Arbitrary(
+      Gen.delay(
+        arbPureConc[E, Resource[PureConc[E, *], A]].arbitrary
+      )
+    )
+
+  implicit def arbResource[F[_]: Bracket[*[_], E], E, A: Arbitrary: Cogen](
+      implicit arbEffect: Arbitrary[F[Resource[F, A]]],
+      arbFA: Arbitrary[F[A]],
+      arbAFUnit: Arbitrary[A => F[Unit]]
+  ): Arbitrary[Resource[F, A]] = Arbitrary(genResource[F, E, A])
+
+  implicit def cogenResource[F[_]: Bracket[*[_], E], E, A](
+      implicit cogenF: Cogen[F[Unit]]
+  ): Cogen[Resource[F, A]] = cogenF.contramap(_.used)
 
   implicit def eqResource[F[_]: Bracket[*[_], E], E, A](
-      implicit eqFUnit: Eq[F[Unit]]
+      implicit
+      eqFUnit: Eq[F[Unit]]
+      /*  exhaustiveUse: ExhaustiveCheck[A => F[B]], */
+      // eqFListB: Eq[F[List[B]]]
   ): Eq[Resource[F, A]] =
-    Eq.by(_.used) //todo pass real function?
+    Eq.by(
+      _.used
+    ) // { resource => exhaustiveUse.allValues.traverse(resource.use(_)) }
 
 }
 

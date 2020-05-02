@@ -144,7 +144,7 @@ object Resource {
     *
     * @param a the value to lift into a resource
     */
-  def pure[F[_], A, E](a: A)(implicit F: Bracket[F, E]): Resource[F, A] =
+  def pure[F[_], E, A](a: A)(implicit F: Bracket[F, E]): Resource[F, A] =
     Allocate[F, F.Case, A](F.pure((a, (_: F.Case[_]) => F.unit)))
 
   /**
@@ -154,7 +154,7 @@ object Resource {
     * @param fa the value to lift into a resource
     */
   def liftF[F[_], A, E](fa: F[A])(implicit F: Bracket[F, E]): Resource[F, A] =
-    Resource.suspend(fa.map(a => Resource.pure[F, A, E](a)))
+    Resource.suspend(fa.map(a => Resource.pure[F, E, A](a)))
 
   /**
     * Implementation for the `tailRecM` operation, as described via
@@ -220,7 +220,7 @@ object Resource {
     new Region[Resource, F, E] {
       override type Case[A] = Outcome[F, E, A]
 
-      def pure[A](x: A): Resource[F, A] = Resource.pure[F, A, E](x)
+      def pure[A](x: A): Resource[F, A] = Resource.pure[F, E, A](x)
 
       def raiseError[A](e: E): Resource[F, A] = Resource.liftF(F.raiseError(e))
 
@@ -252,15 +252,15 @@ object Resource {
                 (r: Either[E, Any]) =>
                   r match {
                     case Left(error) =>
-                      Resource.pure[F, Either[E, A], E](Left(error))
+                      Resource.pure[F, E, Either[E, A]](Left(error))
                     case Right(s) => attempt(fs(s))
                   }
               )
             })
 
-          case Suspend(resource) =>
-            Suspend(F.map(F.attempt(resource)) {
-              case Left(error) => Resource.pure[F, Either[E, A], E](Left(error))
+          case s: Suspend[F, a] =>
+            Suspend(F.map(F.attempt(s.resource)) {
+              case Left(error) => Resource.pure[F, E, Either[E, A]](Left(error))
               case Right(fa)   => attempt(fa) //dead code warning?
             })
         }

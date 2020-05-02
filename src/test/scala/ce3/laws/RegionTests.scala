@@ -82,8 +82,14 @@ object RegionTests {
       implicit
       F0: Region[R, F, E] { type Case[A] = Case0[A] },
       B: Bracket[F, E] { type Case[A] = Case0[A] }
-  ): RegionTests[R, F, E] =
+  ): RegionTests[R, F, E] {
+    val laws: RegionLaws[R, F, E] {
+      val F: F0.type
+    }
+  } =
     new RegionTests[R, F, E] {
-      val laws = RegionLaws[R, F, Case0, E]
+      val laws: RegionLaws[R, F, E] {
+        val F: F0.type
+      } = RegionLaws[R, F, Case0, E]
     }
 }
