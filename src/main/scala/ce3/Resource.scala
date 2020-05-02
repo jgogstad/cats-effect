@@ -194,7 +194,7 @@ object Resource {
   )(implicit F: Bracket[F, E]): Resource[F, B] = {
     def continue(r: Resource[F, Either[A, B]]): Resource[F, B] =
       r match {
-        case a: Allocate[F, F.Case, Either[A, B]] =>
+        case a: Allocate[F, F.Case, Either[A, B]] @unchecked =>
           Suspend(a.resource.flatMap[Resource[F, B]] {
             case (Left(a), release) =>
               release(F.CaseInstance.pure(a)).map(_ =>
