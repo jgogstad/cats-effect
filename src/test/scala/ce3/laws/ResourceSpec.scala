@@ -76,3 +76,34 @@ class ResourceSpec extends Specification with Discipline with ScalaCheck {
     Eq.by(_.used) //todo pass real function?
 
 }
+
+object Demo extends App {
+
+  def prog[F[_]: ConcurrentBracket[*[_], E], E, A, B](
+      a: A,
+      b: B,
+      e: E
+  ): F[B] = {
+    val F = ConcurrentBracket[F, E]
+
+    val R = implicitly[Region[Resource, F, E]]
+
+    Resource
+      .make(F.pure(b))(b => F.raiseError[Unit](e))
+      .use(a => F.pure(a))
+  }
+
+  // Completed(Some(hello))
+  // │
+  // ├ Notify 0x6404F418
+  // ├ Notify 0x6404F418
+  // ├ Notify 0x6404F418
+  // ├ Notify 0x6404F418
+  // ├ Notify 0x6404F418
+  // ├ Notify 0x2794EAB6
+  // ╰ Pure Completed(hello)
+  //todo: shouldn't this raise an exception in the background? How does PureConc handle failures in finalizers?
+  println {
+    prog[PureConc[Int, *], Int, Int, String](42, "hello", -5).show
+  }
+}
