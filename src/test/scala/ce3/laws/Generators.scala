@@ -44,7 +44,7 @@ object Generators {
 
   def genPureResource[F[_]: Bracket[*[_], E], E, A: Arbitrary]
       : Gen[Resource[F, A]] =
-    Arbitrary.arbitrary[A].map(Resource.pure[F, E, A](_))
+    Arbitrary.arbitrary[A].map(Resource.pure[F, A](_))
 
   def genSuspendResource[F[_]: Bracket[*[_], E], E, A](
       implicit arbEffect: Arbitrary[F[Resource[F, A]]]

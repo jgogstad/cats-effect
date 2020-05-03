@@ -90,11 +90,7 @@ object Resource {
   def apply[F[_], A, E](
       resource: F[(A, F[Unit])]
   )(implicit F: Bracket[F, E]): Resource[F, A] =
-    Allocate[F, F.Case, A] {
-      resource.map {
-        case (a, release) => (a, _ => release)
-      }
-    }
+    applyCase[F, F.Case, E, A](resource.map(_.map(Function.const)))(F)
 
   /**
     * Creates a resource from an allocating effect, with a finalizer
@@ -171,8 +167,8 @@ object Resource {
     *
     * @param a the value to lift into a resource
     */
-  def pure[F[_], E, A](a: A)(implicit F: Bracket[F, E]): Resource[F, A] =
-    Allocate[F, F.Case, A](F.pure((a, (_: F.Case[_]) => F.unit)))
+  def pure[F[_], A](a: A)(implicit F: Applicative[F]): Resource[F, A] =
+    Allocate[F, Any, A](F.pure((a, (_: Any) => F.unit)))
 
   /**
     * Lifts an applicative into a resource. The resource has a no-op release.
@@ -180,8 +176,8 @@ object Resource {
     *
     * @param fa the value to lift into a resource
     */
-  def liftF[F[_], A, E](fa: F[A])(implicit F: Bracket[F, E]): Resource[F, A] =
-    Resource.suspend(fa.map(a => Resource.pure[F, E, A](a)))
+  def liftF[F[_], A](fa: F[A])(implicit F: Applicative[F]): Resource[F, A] =
+    Resource.suspend(fa.map(a => Resource.pure[F, A](a)))
 
   /**
     * Implementation for the `tailRecM` operation, as described via
@@ -247,7 +243,7 @@ object Resource {
     new Region[Resource, F, E] {
       override type Case[A] = F.Case[A]
 
-      def pure[A](x: A): Resource[F, A] = Resource.pure[F, E, A](x)
+      def pure[A](x: A): Resource[F, A] = Resource.pure[F, A](x)
 
       def raiseError[A](e: E): Resource[F, A] = Resource.liftF(F.raiseError(e))
 
@@ -278,8 +274,7 @@ object Resource {
                 attempt(source),
                 (r: Either[E, Any]) =>
                   r match {
-                    case Left(error) =>
-                      Resource.pure[F, E, Either[E, A]](Left(error))
+                    case Left(error) => pure(Left(error))
                     case Right(s) => attempt(fs(s))
                   }
               )
@@ -287,8 +282,8 @@ object Resource {
 
           case s: Suspend[F, a] =>
             Suspend(F.map(F.attempt(s.resource)) {
-              case Left(error) => Resource.pure[F, E, Either[E, A]](Left(error))
-              case Right(fa)   => attempt(fa) //dead code warning?
+              case Left(error) => pure(Left(error))
+              case Right(fa)   => attempt(fa)
             })
         }
 
@@ -301,7 +296,7 @@ object Resource {
       )(f: A => Resource[F, Either[A, B]]): Resource[F, B] =
         Resource.tailRecM(a)(f)
 
-      def CaseInstance: ApplicativeError[Case, E] =
+      implicit val CaseInstance: ApplicativeError[Case, E] =
         F.CaseInstance
 
       def openCase[A](acquire: F[A])(
